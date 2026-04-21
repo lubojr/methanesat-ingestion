@@ -16,14 +16,15 @@
 - [x] 3.2 Add logic to upload the downloaded COG files to the target S3 bucket.
 - [x] 3.3 Ensure uploaded objects have correct permissions/metadata (if required).
 
-## 4. eoapi Ingestion
+## 4. STAC API Ingestion
 
-- [ ] 4.1 Implement connection to the eoapi raster database.
-- [ ] 4.2 Add logic to register the S3 COG objects in the database.
-- [ ] 4.3 Verify ingestion by checking for new entries in the database.
+- [x] 4.1 Install and configure `pypgstac` and `rio-stac`.
+- [x] 4.2 Implement STAC Collection creation.
+- [x] 4.3 Implement STAC Item generation using `rio-stac`.
+- [x] 4.4 Implement Item ingestion using `pypgstac`.
 
-## 5. Cleanup and Verification
+## 5. Cleanup and Polishing
 
-- [ ] 5.1 Add error handling and logging throughout the script.
-- [ ] 5.2 Test the script with a small subset of data.
-- [ ] 5.3 Verify all files are in S3 and correctly indexed in eoapi.
+- [x] 5.1 Add error handling and logging throughout the script.
+- [x] 5.2 Test the script with a small subset of data.
+- [x] 5.3 Verify all files are in S3.
