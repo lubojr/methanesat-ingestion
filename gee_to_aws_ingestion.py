@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 from dotenv import load_dotenv
 from google.cloud import storage
 import boto3
@@ -17,14 +18,14 @@ def get_gcs_client():
     client = storage.Client(project=project)
     return client
 
-def list_gee_files(client, bucket_name, prefix=None):
+def list_gee_files(client, bucket_name, prefix=None, suffixes=('.tif', '.tiff')):
     logger.info(f"Listing files in bucket: {bucket_name} with prefix: {prefix}")
     bucket = client.bucket(bucket_name)
     blobs = bucket.list_blobs(prefix=prefix)
     
-    cog_files = [blob.name for blob in blobs if blob.name.lower().endswith(('.tif', '.tiff'))]
-    logger.info(f"Found {len(cog_files)} COG files.")
-    return cog_files
+    files = [blob.name for blob in blobs if blob.name.lower().endswith(suffixes)]
+    logger.info(f"Found {len(files)} files matching suffixes {suffixes}.")
+    return files
 
 def download_gee_file(client, bucket_name, file_name, destination_dir):
     logger.info(f"Downloading {file_name} from {bucket_name} to {destination_dir}")
@@ -111,6 +112,20 @@ def ingest_items(items):
         loader = Loader(db)
         loader.load_items([item.to_dict() for item in items], Methods.upsert)
 
+def is_geojson_valid(local_path):
+    logger.info(f"Checking GeoJSON content: {local_path}")
+    try:
+        with open(local_path, 'r') as f:
+            data = json.load(f)
+            features = data.get('features', [])
+            is_valid = len(features) > 0
+            if not is_valid:
+                logger.info(f"GeoJSON file {local_path} is empty (no features).")
+            return is_valid
+    except Exception as e:
+        logger.error(f"Error reading GeoJSON {local_path}: {e}")
+        return False
+
 def main():
     load_dotenv()
     
@@ -124,6 +139,8 @@ def main():
     limit = os.getenv("LIMIT")
     if limit:
         limit = int(limit)
+    skip_ingestion = os.getenv("SKIP_INGESTION", "false").lower() == "true"
+    aws_s3_prefix = os.getenv("AWS_S3_PREFIX", "methanesat_l4")
 
     if not all([gee_bucket_name, aws_bucket_name]):
         logger.error("Missing required environment variables (GEE_BUCKET, AWS_S3_BUCKET).")
@@ -136,13 +153,26 @@ def main():
         
         # 4.2 Create/Ingest Collection
         collection = create_stac_collection()
-        ingest_collection(collection)
+        if not skip_ingestion:
+            ingest_collection(collection)
+        else:
+            logger.info("SKIP_INGESTION is true. Skipping STAC collection ingestion.")
         
+        # Determine suffixes based on prefix
+        suffixes = ('.tif', '.tiff')
+        if 'divergence_integral' in gee_prefix:
+            suffixes = ('.geojson',)
+            
         # 1. GEE Data Collection
-        gee_files = list_gee_files(gcs_client, gee_bucket_name, gee_prefix)
+        gee_files = list_gee_files(gcs_client, gee_bucket_name, gee_prefix, suffixes=suffixes)
         
+        # Filter core files
+        if 'core/' in gee_prefix:
+            gee_files = [f for f in gee_files if 'COG_GEE' in f]
+            logger.info(f"Filtered for COG_GEE in core/. Remaining files: {len(gee_files)}")
+            
         if not gee_files:
-            logger.warning("No COG files found to process.")
+            logger.warning("No files found to process.")
             return
 
         files_to_process = gee_files[:limit] if limit else gee_files
@@ -154,8 +184,14 @@ def main():
                 # Download
                 local_path = download_gee_file(gcs_client, gee_bucket_name, gcs_name, local_data_dir)
                 
+                # Content filtering for GeoJSON
+                if gcs_name.lower().endswith('.geojson'):
+                    if not is_geojson_valid(local_path):
+                        cleanup_local_file(local_path)
+                        continue
+                
                 # Upload
-                s3_key = gcs_name # Maintain structure
+                s3_key = os.path.join(aws_s3_prefix, gcs_name)
                 s3_url = upload_to_s3(s3_client, aws_bucket_name, local_path, s3_key)
                 
                 # 4.3 Create STAC Item
@@ -171,7 +207,10 @@ def main():
         
         # 4.4 Ingest Items
         if items_to_ingest:
-            ingest_items(items_to_ingest)
+            if not skip_ingestion:
+                ingest_items(items_to_ingest)
+            else:
+                logger.info(f"SKIP_INGESTION is true. Skipping ingestion of {len(items_to_ingest)} STAC items.")
             
     except Exception as e:
         logger.critical(f"Ingestion process failed: {e}")
