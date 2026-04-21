@@ -12,9 +12,9 @@
 
 ## 3. AWS Data Upload
 
-- [ ] 3.1 Implement S3 client initialization and authentication.
-- [ ] 3.2 Add logic to upload the downloaded COG files to the target S3 bucket.
-- [ ] 3.3 Ensure uploaded objects have correct permissions/metadata (if required).
+- [x] 3.1 Implement S3 client initialization and authentication.
+- [x] 3.2 Add logic to upload the downloaded COG files to the target S3 bucket.
+- [x] 3.3 Ensure uploaded objects have correct permissions/metadata (if required).
 
 ## 4. eoapi Ingestion
 
