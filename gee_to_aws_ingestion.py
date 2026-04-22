@@ -138,24 +138,70 @@ def ingest_collection(collection):
         loader = Loader(db)
         loader.load_collections([collection.to_dict()], Methods.upsert)
 
-def create_stac_item(local_path, s3_url, collection_id, item_datetime=None, geojson_s3_url=None, style_url=None):
+def map_s3_to_public_url(s3_url, public_url_prefix):
+    """
+    Map an S3 URL to a public HTTPS URL.
+    The mapping is relative to the '/public/' folder in the bucket.
+    """
+    if not public_url_prefix:
+        return s3_url
+    
+    # s3_url format: s3://bucket-name/key
+    parts = s3_url.replace("s3://", "").split("/", 1)
+    if len(parts) < 2:
+        return s3_url
+    
+    full_path = parts[1]
+    
+    # The requirement says relative to the /public/ folder
+    if "public/" in full_path:
+        relative_path = full_path.split("public/", 1)[1]
+    else:
+        relative_path = full_path
+        
+    return public_url_prefix.rstrip("/") + "/" + relative_path.lstrip("/")
+
+def create_alternate_links(s3_url):
+    """
+    Create the 'alternate' dictionary for STAC assets.
+    """
+    return {
+        "https": {
+            "href": s3_url,
+            "description": "Access through s3.",
+            "alternate:name": "s3"
+        }
+    }
+
+def create_stac_item(local_path, s3_url, collection_id, item_datetime=None, geojson_s3_url=None, style_url=None, public_url_prefix=None):
     logger.info(f"Generating STAC item for {s3_url}")
+    
+    primary_href = map_s3_to_public_url(s3_url, public_url_prefix)
     
     # Create base assets
     assets = {
         "data": pystac.Asset(
-            href=s3_url,
+            href=primary_href,
             media_type=pystac.MediaType.COG,
             roles=["data"],
+            extra_fields={
+                "alternate": create_alternate_links(s3_url),
+                "alternate:name": "https"
+            }
         )
     }
     
     # Add optional GeoJSON asset
     if geojson_s3_url:
+        geojson_primary_href = map_s3_to_public_url(geojson_s3_url, public_url_prefix)
         assets["vector"] = pystac.Asset(
-            href=geojson_s3_url,
+            href=geojson_primary_href,
             media_type=pystac.MediaType.GEOJSON,
             roles=["metadata", "vector"],
+            extra_fields={
+                "alternate": create_alternate_links(geojson_s3_url),
+                "alternate:name": "https"
+            }
         )
     
     item = stac.create_stac_item(
@@ -255,9 +301,9 @@ def main():
     skip_ingestion = os.getenv("SKIP_INGESTION", "false").lower() == "true"
     ingestion_only = os.getenv("INGESTION_ONLY", "false").lower() == "true"
     aws_s3_prefix = os.getenv("AWS_S3_PREFIX", "methanesat_l4")
-    
-    style_url = os.getenv("STAC_STYLE_URL")
+    stac_public_url_prefix = os.getenv("STAC_PUBLIC_URL_PREFIX")
 
+    style_url = os.getenv("STAC_STYLE_URL")
     if not all([gee_bucket_name, aws_bucket_name]):
         logger.error("Missing required environment variables (GEE_BUCKET, AWS_S3_BUCKET).")
         return
@@ -339,7 +385,8 @@ def main():
                         collection.id, 
                         item_datetime=item_dt,
                         geojson_s3_url=geojson_s3_url,
-                        style_url=style_url
+                        style_url=style_url,
+                        public_url_prefix=stac_public_url_prefix
                     )
                     
                     # Persist STAC JSON to S3
