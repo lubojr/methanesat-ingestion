@@ -31,6 +31,38 @@ def extract_datetime_from_filename(filename):
             logger.error(f"Failed to parse datetime string {dt_str}: {e}")
     return None
 
+def group_gee_files_by_date(client, bucket_name, prefixes):
+    """
+    List files from multiple prefixes and group them by acquisition date.
+    Returns a dict: {date_str: {'cog': gcs_name, 'geojson': gcs_name}}
+    """
+    grouped = {}
+    
+    for prefix in prefixes:
+        logger.info(f"Scanning prefix for grouping: {prefix}")
+        bucket = client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix=prefix)
+        
+        for blob in blobs:
+            name = blob.name
+            dt = extract_datetime_from_filename(name)
+            if not dt:
+                continue
+            
+            date_key = dt.strftime("%Y%m%dT%H%M%SZ")
+            if date_key not in grouped:
+                grouped[date_key] = {'cog': None, 'geojson': None}
+            
+            if 'core/' in name and 'COG_GEE' in name and name.lower().endswith(('.tif', '.tiff')):
+                grouped[date_key]['cog'] = name
+            elif 'divergence_integral/' in name and name.lower().endswith('.geojson'):
+                grouped[date_key]['geojson'] = name
+                
+    # Filter out entries with no COG (as COG is the primary item)
+    final_groups = {k: v for k, v in grouped.items() if v['cog']}
+    logger.info(f"Found {len(final_groups)} matched/available items based on COGs.")
+    return final_groups
+
 def get_gcs_client():
     project = os.getenv("GEE_PROJECT")
     client = storage.Client(project=project)
@@ -106,23 +138,47 @@ def ingest_collection(collection):
         loader = Loader(db)
         loader.load_collections([collection.to_dict()], Methods.upsert)
 
-def create_stac_item(local_path, s3_url, collection_id, item_datetime=None):
+def create_stac_item(local_path, s3_url, collection_id, item_datetime=None, geojson_s3_url=None, style_url=None):
     logger.info(f"Generating STAC item for {s3_url}")
+    
+    # Create base assets
+    assets = {
+        "data": pystac.Asset(
+            href=s3_url,
+            media_type=pystac.MediaType.COG,
+            roles=["data"],
+        )
+    }
+    
+    # Add optional GeoJSON asset
+    if geojson_s3_url:
+        assets["vector"] = pystac.Asset(
+            href=geojson_s3_url,
+            media_type=pystac.MediaType.GEOJSON,
+            roles=["metadata", "vector"],
+        )
+    
     item = stac.create_stac_item(
         local_path,
         id=os.path.basename(local_path).split('.')[0],
         collection=collection_id,
         datetime=item_datetime,
-        assets={
-            "data": pystac.Asset(
-                href=s3_url,
-                media_type=pystac.MediaType.COG,
-                roles=["data"],
-            )
-        },
+        assets=assets,
         with_proj=True,
         with_raster=True,
     )
+    
+    # Add optional style link
+    if style_url:
+        item.add_link(
+            pystac.Link(
+                rel="style",
+                target=style_url,
+                media_type="text/vector-styles",
+                extra_fields={"asset:keys": ["vector"]}
+            )
+        )
+        
     return item
 
 def ingest_items(items):
@@ -153,13 +209,15 @@ def main():
     # Required environment variables
     gee_bucket_name = os.getenv("GEE_BUCKET")
     aws_bucket_name = os.getenv("AWS_S3_BUCKET")
-    gee_prefix = os.getenv("GEE_PREFIX", "")
+    gee_prefixes = [p.strip() for p in os.getenv("GEE_PREFIX", "").split(',')]
     local_data_dir = os.getenv("LOCAL_DATA_DIR", "./data")
     limit = os.getenv("LIMIT")
     if limit:
         limit = int(limit)
     skip_ingestion = os.getenv("SKIP_INGESTION", "false").lower() == "true"
     aws_s3_prefix = os.getenv("AWS_S3_PREFIX", "methanesat_l4")
+    
+    style_url = os.getenv("STAC_STYLE_URL")
 
     if not all([gee_bucket_name, aws_bucket_name]):
         logger.error("Missing required environment variables (GEE_BUCKET, AWS_S3_BUCKET).")
@@ -177,54 +235,59 @@ def main():
         else:
             logger.info("SKIP_INGESTION is true. Skipping STAC collection ingestion.")
         
-        # Determine suffixes based on prefix
-        suffixes = ('.tif', '.tiff')
-        if 'divergence_integral' in gee_prefix:
-            suffixes = ('.geojson',)
-            
-        # 1. GEE Data Collection
-        gee_files = list_gee_files(gcs_client, gee_bucket_name, gee_prefix, suffixes=suffixes)
+        # 2.1 Group files by date
+        grouped_items = group_gee_files_by_date(gcs_client, gee_bucket_name, gee_prefixes)
         
-        # Filter core files
-        if 'core/' in gee_prefix:
-            gee_files = [f for f in gee_files if 'COG_GEE' in f]
-            logger.info(f"Filtered for COG_GEE in core/. Remaining files: {len(gee_files)}")
-            
-        if not gee_files:
-            logger.warning("No files found to process.")
+        if not grouped_items:
+            logger.warning("No matched items found to process.")
             return
 
-        files_to_process = gee_files[:limit] if limit else gee_files
-        logger.info(f"Processing {len(files_to_process)} files.")
+        # Apply limit
+        keys = list(grouped_items.keys())
+        keys_to_process = keys[:limit] if limit else keys
+        logger.info(f"Processing {len(keys_to_process)} matched groups.")
 
         items_to_ingest = []
-        for gcs_name in files_to_process:
+        for date_key in keys_to_process:
+            group = grouped_items[date_key]
+            cog_gcs_name = group['cog']
+            geojson_gcs_name = group['geojson']
+            
             try:
-                # Download
-                local_path = download_gee_file(gcs_client, gee_bucket_name, gcs_name, local_data_dir)
+                # 1. Process COG
+                cog_local_path = download_gee_file(gcs_client, gee_bucket_name, cog_gcs_name, local_data_dir)
+                cog_s3_key = os.path.join(aws_s3_prefix, cog_gcs_name)
+                cog_s3_url = upload_to_s3(s3_client, aws_bucket_name, cog_local_path, cog_s3_key)
                 
-                # Content filtering for GeoJSON
-                if gcs_name.lower().endswith('.geojson'):
-                    if not is_geojson_valid(local_path):
-                        cleanup_local_file(local_path)
-                        continue
+                # 2. Process optional GeoJSON
+                geojson_s3_url = None
+                if geojson_gcs_name:
+                    geojson_local_path = download_gee_file(gcs_client, gee_bucket_name, geojson_gcs_name, local_data_dir)
+                    
+                    # Content filtering for GeoJSON
+                    if is_geojson_valid(geojson_local_path):
+                        geojson_s3_key = os.path.join(aws_s3_prefix, geojson_gcs_name)
+                        geojson_s3_url = upload_to_s3(s3_client, aws_bucket_name, geojson_local_path, geojson_s3_key)
+                    
+                    cleanup_local_file(geojson_local_path)
                 
-                # Upload
-                s3_key = os.path.join(aws_s3_prefix, gcs_name)
-                s3_url = upload_to_s3(s3_client, aws_bucket_name, local_path, s3_key)
-                
-                # Extract datetime from filename
-                item_dt = extract_datetime_from_filename(gcs_name)
-                
-                # 4.3 Create STAC Item
-                item = create_stac_item(local_path, s3_url, collection.id, item_datetime=item_dt)
+                # 3. Create STAC Item
+                item_dt = extract_datetime_from_filename(cog_gcs_name)
+                item = create_stac_item(
+                    cog_local_path, 
+                    cog_s3_url, 
+                    collection.id, 
+                    item_datetime=item_dt,
+                    geojson_s3_url=geojson_s3_url,
+                    style_url=style_url
+                )
                 items_to_ingest.append(item)
                 
-                # Cleanup
-                cleanup_local_file(local_path)
+                # Cleanup COG
+                cleanup_local_file(cog_local_path)
                 
             except Exception as e:
-                logger.error(f"Failed to process {gcs_name}: {e}")
+                logger.error(f"Failed to process group for {date_key}: {e}")
                 continue
         
         # 4.4 Ingest Items
