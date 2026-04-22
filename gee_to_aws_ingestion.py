@@ -1,6 +1,8 @@
 import os
 import logging
 import json
+import re
+from datetime import datetime
 from dotenv import load_dotenv
 from google.cloud import storage
 import boto3
@@ -12,6 +14,22 @@ from pypgstac.load import Methods, Loader
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def extract_datetime_from_filename(filename):
+    """
+    Extract acquisition datetime from filename using regex.
+    Example: MSAT_L4_COG_GEE_interim_c01460640_p5129_v00009003_20240911T220558Z_220620Z.tif
+    Extracts: 20240911T220558Z
+    """
+    pattern = r"(\d{8}T\d{6}Z)"
+    match = re.search(pattern, filename)
+    if match:
+        dt_str = match.group(1)
+        try:
+            return datetime.strptime(dt_str, "%Y%m%dT%H%M%SZ")
+        except ValueError as e:
+            logger.error(f"Failed to parse datetime string {dt_str}: {e}")
+    return None
 
 def get_gcs_client():
     project = os.getenv("GEE_PROJECT")
@@ -88,12 +106,13 @@ def ingest_collection(collection):
         loader = Loader(db)
         loader.load_collections([collection.to_dict()], Methods.upsert)
 
-def create_stac_item(local_path, s3_url, collection_id):
+def create_stac_item(local_path, s3_url, collection_id, item_datetime=None):
     logger.info(f"Generating STAC item for {s3_url}")
     item = stac.create_stac_item(
         local_path,
         id=os.path.basename(local_path).split('.')[0],
         collection=collection_id,
+        datetime=item_datetime,
         assets={
             "data": pystac.Asset(
                 href=s3_url,
@@ -194,8 +213,11 @@ def main():
                 s3_key = os.path.join(aws_s3_prefix, gcs_name)
                 s3_url = upload_to_s3(s3_client, aws_bucket_name, local_path, s3_key)
                 
+                # Extract datetime from filename
+                item_dt = extract_datetime_from_filename(gcs_name)
+                
                 # 4.3 Create STAC Item
-                item = create_stac_item(local_path, s3_url, collection.id)
+                item = create_stac_item(local_path, s3_url, collection.id, item_datetime=item_dt)
                 items_to_ingest.append(item)
                 
                 # Cleanup
