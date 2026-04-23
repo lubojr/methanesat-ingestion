@@ -370,6 +370,8 @@ def main() -> None:
     ingestion_only = os.getenv("INGESTION_ONLY", "false").lower() == "true"
     aws_s3_prefix = os.getenv("AWS_S3_PREFIX", "methanesat_l4")
     stac_public_url_prefix = os.getenv("STAC_PUBLIC_URL_PREFIX")
+    skip_download = os.getenv("SKIP_DOWNLOAD", "false").lower() == "true"
+    skip_upload = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
 
     style_url = os.getenv("STAC_STYLE_URL")
     if not all([gee_bucket_name, aws_bucket_name]):
