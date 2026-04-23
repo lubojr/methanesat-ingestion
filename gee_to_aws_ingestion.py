@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Tuple
 from dotenv import load_dotenv
 from google.cloud import storage
@@ -26,11 +26,11 @@ def extract_datetime_from_filename(filename: str) -> Optional[datetime]:
     Extracts: 20240911T220558Z
     """
     pattern = r"(\d{8}T\d{6}Z)"
-    match = re.search(pattern, filename)
+    match = re.search(pattern, filename, re.IGNORECASE)
     if match:
-        dt_str = match.group(1)
+        dt_str = match.group(1).upper()
         try:
-            return datetime.strptime(dt_str, "%Y%m%dT%H%M%SZ")
+            return datetime.strptime(dt_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
         except ValueError as e:
             logger.error(f"Failed to parse datetime string {dt_str}: {e}")
     return None
@@ -56,7 +56,7 @@ def group_gee_files_by_date(
             if not dt:
                 continue
 
-            date_key = dt.strftime("%Y%m%dT%H%M%SZ")
+            date_key = dt.strftime("%Y%m%d")
             if date_key not in grouped:
                 grouped[date_key] = {"cog": None, "geojson": None}
 
