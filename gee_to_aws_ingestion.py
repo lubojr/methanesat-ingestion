@@ -30,7 +30,9 @@ def extract_datetime_from_filename(filename: str) -> Optional[datetime]:
     if match:
         dt_str = match.group(1).upper()
         try:
-            return datetime.strptime(dt_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            return datetime.strptime(dt_str, "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
         except ValueError as e:
             logger.error(f"Failed to parse datetime string {dt_str}: {e}")
     return None
@@ -245,7 +247,7 @@ def create_stac_item(
         local_path,
         id=os.path.basename(local_path).split(".")[0],
         collection=collection_id,
-        datetime=item_datetime,
+        input_datetime=item_datetime,
         assets=assets,
         with_proj=True,
         with_raster=True,
