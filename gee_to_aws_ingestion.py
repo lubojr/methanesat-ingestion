@@ -1,7 +1,10 @@
 import os
 import logging
 import json
+from pathlib import Path
 import re
+import requests
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Tuple
 from dotenv import load_dotenv
@@ -62,11 +65,7 @@ def group_gee_files_by_date(
             if date_key not in grouped:
                 grouped[date_key] = {"cog": None, "geojson": None}
 
-            if (
-                "core/" in name
-                and "COG_GEE" in name
-                and name.lower().endswith((".tif", ".tiff"))
-            ):
+            if "core/" in name and "COG_GEE" in name and name.lower().endswith(".tif"):
                 grouped[date_key]["cog"] = name
             elif "divergence_integral/" in name and name.lower().endswith(".geojson"):
                 grouped[date_key]["geojson"] = name
@@ -132,7 +131,11 @@ def get_s3_client() -> Any:
 
 
 def upload_to_s3(
-    client: Any, bucket_name: str, local_path: str, s3_key: str, skip_if_exists: bool = False
+    client: Any,
+    bucket_name: str,
+    local_path: str,
+    s3_key: str,
+    skip_if_exists: bool = False,
 ) -> str:
     if skip_if_exists:
         try:
@@ -252,7 +255,7 @@ def create_stac_item(
     # Add optional GeoJSON asset
     if geojson_s3_url:
         geojson_primary_href = map_s3_to_public_url(geojson_s3_url, public_url_prefix)
-        assets["vector"] = pystac.Asset(
+        assets["distinct_point_sources"] = pystac.Asset(
             href=geojson_primary_href,
             media_type=pystac.MediaType.GEOJSON,
             roles=["metadata", "vector"],
@@ -272,14 +275,14 @@ def create_stac_item(
         with_raster=True,
     )
 
-    # Add optional style link
-    if style_url:
+    # Add optional vector style link
+    if style_url and geojson_s3_url:
         item.add_link(
             pystac.Link(
                 rel="style",
                 target=style_url,
                 media_type="text/vector-styles",
-                extra_fields={"asset:keys": ["vector"]},
+                extra_fields={"asset:keys": ["distinct_point_sources"]},
             )
         )
 
@@ -353,6 +356,81 @@ def read_json_from_s3(client: Any, bucket_name: str, key: str) -> Dict[str, Any]
         raise
 
 
+def extract_scene_id(filename: str):
+    """
+    Extract core MethaneSAT scene ID from filename.
+    """
+    pattern = r"(c\d+[A-Z0-9]+_p\d+_v\d+_\d{8}T\d{6}Z_\d{6}Z)"
+    match = re.search(pattern, filename)
+    return match.group(1) if match else None
+
+
+def find_items_by_asset_filename(
+    feature_collection: dict, filename: str
+) -> Dict[str, Any] | None:
+    """
+    Search STAC FeatureCollection for items whose asset href contains the given filename.
+
+    :param feature_collection: dict (STAC API search response)
+    :param filename: str (substring to match in asset href)
+    :return: first matching item dict or None
+    """
+    scene_id = extract_scene_id(filename)
+    if not scene_id:
+        return None
+
+    for feature in feature_collection.get("features", []):
+        assets = feature.get("assets", {})
+
+        for _, asset in assets.items():
+            href = asset.get("href", "")
+            if scene_id in href:
+                logger.info(
+                    f"Found matching item for filename {filename} with scene ID {scene_id}"
+                )
+                return feature
+    logger.error(f"No matching item found in STAC collection for filename: {filename}")
+
+
+def filter_latest_processing(paths: list[str]) -> list[str]:
+    """
+    Keep all non-.tif files.
+    For .tif files: keep only the highest pXXXX per scene.
+
+    :param paths: list[str]
+    :return: list[str]
+    """
+
+    pattern = re.compile(r"(c\d+[A-Z0-9]+)_p(\d+)_(v\d+_\d{8}T\d{6}Z_\d{6}Z)")
+
+    grouped = defaultdict(list)
+    result = []
+
+    for path in paths:
+        if not path.lower().endswith(".tif"):
+            # always keep non-TIF (e.g. geojson)
+            result.append(path)
+            continue
+
+        match = pattern.search(path)
+        if not match:
+            # if TIF but doesn't match pattern, keep it (safer)
+            result.append(path)
+            continue
+
+        scene_prefix = f"{match.group(1)}_{match.group(3)}"
+        p_value = int(match.group(2))
+
+        grouped[scene_prefix].append((p_value, path))
+
+    # select highest pXXXX per scene for TIFs
+    for group in grouped.values():
+        best = max(group, key=lambda x: x[0])
+        result.append(best[1])
+
+    return result
+
+
 def main() -> None:
     load_dotenv(override=True)
 
@@ -391,7 +469,10 @@ def main() -> None:
             ingest_collection(collection)
         else:
             logger.info("SKIP_INGESTION is true. Skipping STAC collection ingestion.")
-
+        if STAC_REMOTE_ENDPOINT := os.getenv("STAC_REMOTE_ENDPOINT"):
+            # fetch API response
+            resp = requests.get(STAC_REMOTE_ENDPOINT)
+            stac_feature_collection = resp.json()
         if ingestion_only:
             logger.info("--- INGESTION_ONLY mode active ---")
             stac_keys = list_stac_items_from_s3(
@@ -415,9 +496,11 @@ def main() -> None:
                     logger.error(f"Failed to load item from {key}: {e}")
                     continue
         else:
+            # filter to only contain newest processing id for COGs
+            gee_prefixes_filtered = filter_latest_processing(gee_prefixes)
             # 2.1 Group files by date
             grouped_items = group_gee_files_by_date(
-                gcs_client, gee_bucket_name, gee_prefixes
+                gcs_client, gee_bucket_name, gee_prefixes_filtered
             )
 
             if not grouped_items:
@@ -490,6 +573,14 @@ def main() -> None:
                         style_url=style_url,
                         public_url_prefix=stac_public_url_prefix,
                     )
+                    remote_item = find_items_by_asset_filename(
+                        stac_feature_collection, Path(cog_local_path).name
+                    )
+                    # Merge properties from remote item if available
+                    if remote_item:
+                        for prop in remote_item.get("properties", {}):
+                            if prop not in item.properties:
+                                item.properties[prop] = remote_item["properties"][prop]
 
                     # Persist STAC JSON to S3
                     stac_s3_key = cog_s3_key.rsplit(".", 1)[0] + ".json"
