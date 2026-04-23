@@ -99,14 +99,22 @@ def list_gee_files(
 
 
 def download_gee_file(
-    client: storage.Client, bucket_name: str, file_name: str, destination_dir: str
+    client: storage.Client,
+    bucket_name: str,
+    file_name: str,
+    destination_dir: str,
+    skip_if_exists: bool = False,
 ) -> str:
+    os.makedirs(destination_dir, exist_ok=True)
+    destination_path = os.path.join(destination_dir, os.path.basename(file_name))
+
+    if skip_if_exists and os.path.exists(destination_path):
+        logger.info(f"File {destination_path} already exists. Skipping download.")
+        return destination_path
+
     logger.info(f"Downloading {file_name} from {bucket_name} to {destination_dir}")
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(file_name)
-
-    os.makedirs(destination_dir, exist_ok=True)
-    destination_path = os.path.join(destination_dir, os.path.basename(file_name))
 
     blob.download_to_filename(destination_path)
     logger.info(f"Successfully downloaded to {destination_path}")
@@ -123,7 +131,18 @@ def get_s3_client() -> Any:
     return client
 
 
-def upload_to_s3(client: Any, bucket_name: str, local_path: str, s3_key: str) -> str:
+def upload_to_s3(
+    client: Any, bucket_name: str, local_path: str, s3_key: str, skip_if_exists: bool = False
+) -> str:
+    if skip_if_exists:
+        try:
+            client.head_object(Bucket=bucket_name, Key=s3_key)
+            logger.info(f"s3://{bucket_name}/{s3_key} already exists. Skipping upload.")
+            return f"s3://{bucket_name}/{s3_key}"
+        except client.exceptions.ClientError:
+            # Object does not exist, proceed with upload
+            pass
+
     logger.info(f"Uploading {local_path} to s3://{bucket_name}/{s3_key}")
     try:
         client.upload_file(local_path, bucket_name, s3_key)
@@ -417,11 +436,19 @@ def main() -> None:
                 try:
                     # 1. Process COG
                     cog_local_path = download_gee_file(
-                        gcs_client, gee_bucket_name, cog_gcs_name, local_data_dir
+                        gcs_client,
+                        gee_bucket_name,
+                        cog_gcs_name,
+                        local_data_dir,
+                        skip_if_exists=skip_download,
                     )  # type: ignore
                     cog_s3_key = os.path.join(aws_s3_prefix, cog_gcs_name)  # type: ignore
                     cog_s3_url = upload_to_s3(
-                        s3_client, aws_bucket_name, cog_local_path, cog_s3_key
+                        s3_client,
+                        aws_bucket_name,
+                        cog_local_path,
+                        cog_s3_key,
+                        skip_if_exists=skip_upload,
                     )
 
                     # 2. Process optional GeoJSON
@@ -432,6 +459,7 @@ def main() -> None:
                             gee_bucket_name,
                             geojson_gcs_name,
                             local_data_dir,
+                            skip_if_exists=skip_download,
                         )
 
                         # Content filtering for GeoJSON
@@ -444,6 +472,7 @@ def main() -> None:
                                 aws_bucket_name,
                                 geojson_local_path,
                                 geojson_s3_key,
+                                skip_if_exists=skip_upload,
                             )
 
                         cleanup_local_file(geojson_local_path)
