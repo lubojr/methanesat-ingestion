@@ -3,6 +3,7 @@ import logging
 import json
 import re
 from datetime import datetime
+from typing import List, Dict, Optional, Any, Tuple
 from dotenv import load_dotenv
 from google.cloud import storage
 import boto3
@@ -15,7 +16,7 @@ from pypgstac.load import Methods, Loader
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def extract_datetime_from_filename(filename):
+def extract_datetime_from_filename(filename: str) -> Optional[datetime]:
     """
     Extract acquisition datetime from filename using regex.
     Example: MSAT_L4_COG_GEE_interim_c01460640_p5129_v00009003_20240911T220558Z_220620Z.tif
@@ -31,7 +32,7 @@ def extract_datetime_from_filename(filename):
             logger.error(f"Failed to parse datetime string {dt_str}: {e}")
     return None
 
-def group_gee_files_by_date(client, bucket_name, prefixes):
+def group_gee_files_by_date(client: storage.Client, bucket_name: str, prefixes: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
     """
     List files from multiple prefixes and group them by acquisition date.
     Returns a dict: {date_str: {'cog': gcs_name, 'geojson': gcs_name}}
@@ -63,12 +64,12 @@ def group_gee_files_by_date(client, bucket_name, prefixes):
     logger.info(f"Found {len(final_groups)} matched/available items based on COGs.")
     return final_groups
 
-def get_gcs_client():
+def get_gcs_client() -> storage.Client:
     project = os.getenv("GEE_PROJECT")
     client = storage.Client(project=project)
     return client
 
-def list_gee_files(client, bucket_name, prefix=None, suffixes=('.tif', '.tiff')):
+def list_gee_files(client: storage.Client, bucket_name: str, prefix: Optional[str] = None, suffixes: Tuple[str, ...] = ('.tif', '.tiff')) -> List[str]:
     logger.info(f"Listing files in bucket: {bucket_name} with prefix: {prefix}")
     bucket = client.bucket(bucket_name)
     blobs = bucket.list_blobs(prefix=prefix)
@@ -77,7 +78,7 @@ def list_gee_files(client, bucket_name, prefix=None, suffixes=('.tif', '.tiff'))
     logger.info(f"Found {len(files)} files matching suffixes {suffixes}.")
     return files
 
-def download_gee_file(client, bucket_name, file_name, destination_dir):
+def download_gee_file(client: storage.Client, bucket_name: str, file_name: str, destination_dir: str) -> str:
     logger.info(f"Downloading {file_name} from {bucket_name} to {destination_dir}")
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(file_name)
@@ -89,7 +90,7 @@ def download_gee_file(client, bucket_name, file_name, destination_dir):
     logger.info(f"Successfully downloaded to {destination_path}")
     return destination_path
 
-def get_s3_client():
+def get_s3_client() -> Any:
     client = boto3.client(
         's3',
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
@@ -98,7 +99,7 @@ def get_s3_client():
     )
     return client
 
-def upload_to_s3(client, bucket_name, local_path, s3_key):
+def upload_to_s3(client: Any, bucket_name: str, local_path: str, s3_key: str) -> str:
     logger.info(f"Uploading {local_path} to s3://{bucket_name}/{s3_key}")
     try:
         client.upload_file(local_path, bucket_name, s3_key)
@@ -108,7 +109,7 @@ def upload_to_s3(client, bucket_name, local_path, s3_key):
         logger.error(f"Failed to upload {local_path} to S3: {e}")
         raise
 
-def cleanup_local_file(local_path):
+def cleanup_local_file(local_path: str) -> None:
     try:
         if os.path.exists(local_path):
             os.remove(local_path)
@@ -116,7 +117,7 @@ def cleanup_local_file(local_path):
     except Exception as e:
         logger.warning(f"Failed to cleanup local file {local_path}: {e}")
 
-def create_stac_collection():
+def create_stac_collection() -> pystac.Collection:
     collection_id = os.getenv("STAC_COLLECTION_ID")
     title = os.getenv("STAC_COLLECTION_TITLE")
     description = os.getenv("STAC_COLLECTION_DESCRIPTION")
@@ -132,13 +133,13 @@ def create_stac_collection():
     )
     return collection
 
-def ingest_collection(collection):
+def ingest_collection(collection: pystac.Collection) -> None:
     logger.info(f"Ingesting STAC collection: {collection.id}")
     with PgstacDB() as db:
         loader = Loader(db)
         loader.load_collections([collection.to_dict()], Methods.upsert)
 
-def map_s3_to_public_url(s3_url, public_url_prefix):
+def map_s3_to_public_url(s3_url: str, public_url_prefix: Optional[str]) -> str:
     """
     Map an S3 URL to a public HTTPS URL.
     The mapping is relative to the '/public/' folder in the bucket.
@@ -161,7 +162,7 @@ def map_s3_to_public_url(s3_url, public_url_prefix):
         
     return public_url_prefix.rstrip("/") + "/" + relative_path.lstrip("/")
 
-def create_alternate_links(s3_url):
+def create_alternate_links(s3_url: str) -> Dict[str, Any]:
     """
     Create the 'alternate' dictionary for STAC assets.
     """
@@ -173,7 +174,7 @@ def create_alternate_links(s3_url):
         }
     }
 
-def create_stac_item(local_path, s3_url, collection_id, item_datetime=None, geojson_s3_url=None, style_url=None, public_url_prefix=None):
+def create_stac_item(local_path: str, s3_url: str, collection_id: str, item_datetime: Optional[datetime] = None, geojson_s3_url: Optional[str] = None, style_url: Optional[str] = None, public_url_prefix: Optional[str] = None) -> pystac.Item:
     logger.info(f"Generating STAC item for {s3_url}")
     
     primary_href = map_s3_to_public_url(s3_url, public_url_prefix)
@@ -227,13 +228,13 @@ def create_stac_item(local_path, s3_url, collection_id, item_datetime=None, geoj
         
     return item
 
-def ingest_items(items):
+def ingest_items(items: List[pystac.Item]) -> None:
     logger.info(f"Ingesting {len(items)} STAC items")
     with PgstacDB() as db:
         loader = Loader(db)
         loader.load_items([item.to_dict() for item in items], Methods.upsert)
 
-def is_geojson_valid(local_path):
+def is_geojson_valid(local_path: str) -> bool:
     logger.info(f"Checking GeoJSON content: {local_path}")
     try:
         with open(local_path, 'r') as f:
@@ -247,7 +248,7 @@ def is_geojson_valid(local_path):
         logger.error(f"Error reading GeoJSON {local_path}: {e}")
         return False
 
-def upload_json_to_s3(client, bucket_name, data_dict, s3_key):
+def upload_json_to_s3(client: Any, bucket_name: str, data_dict: Dict[str, Any], s3_key: str) -> None:
     logger.info(f"Uploading STAC JSON to s3://{bucket_name}/{s3_key}")
     try:
         client.put_object(
@@ -261,7 +262,7 @@ def upload_json_to_s3(client, bucket_name, data_dict, s3_key):
         logger.error(f"Failed to upload STAC JSON to S3: {e}")
         raise
 
-def list_stac_items_from_s3(client, bucket_name, prefix):
+def list_stac_items_from_s3(client: Any, bucket_name: str, prefix: str) -> List[str]:
     logger.info(f"Listing STAC JSON files in s3://{bucket_name}/{prefix}")
     paginator = client.get_paginator('list_objects_v2')
     pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
@@ -275,7 +276,7 @@ def list_stac_items_from_s3(client, bucket_name, prefix):
     logger.info(f"Found {len(json_keys)} STAC JSON files.")
     return json_keys
 
-def read_json_from_s3(client, bucket_name, key):
+def read_json_from_s3(client: Any, bucket_name: str, key: str) -> Dict[str, Any]:
     logger.info(f"Reading STAC JSON from s3://{bucket_name}/{key}")
     try:
         response = client.get_object(Bucket=bucket_name, Key=key)
@@ -285,7 +286,7 @@ def read_json_from_s3(client, bucket_name, key):
         logger.error(f"Failed to read STAC JSON from S3: {e}")
         raise
 
-def main():
+def main() -> None:
     load_dotenv()
     
     logger.info("--- Starting GEE to AWS Ingestion ---")
@@ -297,7 +298,7 @@ def main():
     local_data_dir = os.getenv("LOCAL_DATA_DIR", "./data")
     limit = os.getenv("LIMIT")
     if limit:
-        limit = int(limit)
+        limit = int(limit) # type: ignore
     skip_ingestion = os.getenv("SKIP_INGESTION", "false").lower() == "true"
     ingestion_only = os.getenv("INGESTION_ONLY", "false").lower() == "true"
     aws_s3_prefix = os.getenv("AWS_S3_PREFIX", "methanesat_l4")
@@ -329,7 +330,7 @@ def main():
                 return
                 
             # Apply limit if set
-            stac_keys_to_process = stac_keys[:limit] if limit else stac_keys
+            stac_keys_to_process = stac_keys[:limit] if limit else stac_keys # type: ignore
             logger.info(f"Processing {len(stac_keys_to_process)} STAC items from S3.")
             
             items_to_ingest = []
@@ -350,7 +351,7 @@ def main():
 
             # Apply limit
             keys = list(grouped_items.keys())
-            keys_to_process = keys[:limit] if limit else keys
+            keys_to_process = keys[:limit] if limit else keys # type: ignore
             logger.info(f"Processing {len(keys_to_process)} matched groups.")
 
             items_to_ingest = []
@@ -361,8 +362,8 @@ def main():
                 
                 try:
                     # 1. Process COG
-                    cog_local_path = download_gee_file(gcs_client, gee_bucket_name, cog_gcs_name, local_data_dir)
-                    cog_s3_key = os.path.join(aws_s3_prefix, cog_gcs_name)
+                    cog_local_path = download_gee_file(gcs_client, gee_bucket_name, cog_gcs_name, local_data_dir) # type: ignore
+                    cog_s3_key = os.path.join(aws_s3_prefix, cog_gcs_name) # type: ignore
                     cog_s3_url = upload_to_s3(s3_client, aws_bucket_name, cog_local_path, cog_s3_key)
                     
                     # 2. Process optional GeoJSON
@@ -378,7 +379,7 @@ def main():
                         cleanup_local_file(geojson_local_path)
                     
                     # 3. Create STAC Item
-                    item_dt = extract_datetime_from_filename(cog_gcs_name)
+                    item_dt = extract_datetime_from_filename(cog_gcs_name) # type: ignore
                     item = create_stac_item(
                         cog_local_path, 
                         cog_s3_url, 
