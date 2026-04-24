@@ -450,6 +450,7 @@ def main() -> None:
     stac_public_url_prefix = os.getenv("STAC_PUBLIC_URL_PREFIX")
     skip_download = os.getenv("SKIP_DOWNLOAD", "false").lower() == "true"
     skip_upload = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
+    do_cleanup = os.getenv("DO_CLEANUP", "false").lower() == "true"
 
     style_url = os.getenv("STAC_STYLE_URL")
     if not all([gee_bucket_name, aws_bucket_name]):
@@ -559,8 +560,8 @@ def main() -> None:
                                 geojson_s3_key,
                                 skip_if_exists=skip_upload,
                             )
-
-                        cleanup_local_file(geojson_local_path)
+                        if do_cleanup:
+                            cleanup_local_file(geojson_local_path)
 
                     # 3. Create STAC Item
                     item_dt = extract_datetime_from_filename(cog_gcs_name)  # type: ignore
@@ -591,7 +592,8 @@ def main() -> None:
                     items_to_ingest.append(item)
 
                     # Cleanup COG
-                    cleanup_local_file(cog_local_path)
+                    if do_cleanup:
+                        cleanup_local_file(cog_local_path)
 
                 except Exception as e:
                     logger.error(f"Failed to process group for {date_key}: {e}")
