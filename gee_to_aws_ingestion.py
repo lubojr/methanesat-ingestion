@@ -17,7 +17,9 @@ from pypgstac.load import Methods, Loader
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename="ingest_logs.log",
 )
 logger = logging.getLogger(__name__)
 
@@ -41,38 +43,84 @@ def extract_datetime_from_filename(filename: str) -> Optional[datetime]:
     return None
 
 
-def group_gee_files_by_date(
-    client: storage.Client, bucket_name: str, prefixes: List[str]
-) -> Dict[str, Dict[str, Optional[str]]]:
+def extract_file_metadata(filename: str) -> Optional[Dict[str, Any]]:
     """
-    List files from multiple prefixes and group them by acquisition date.
-    Returns a dict: {date_str: {'cog': gcs_name, 'geojson': gcs_name}}
+    Extracts Location ID, P-version, and Timestamp from GEE filenames.
+    Pattern covers: ..._c01460640_p5129_v00009003_20240911T220558Z...
     """
-    grouped = {}
+    # Regex to capture Location (c...), Process (p...), and Timestamp (YYYYMMDDTHHMMSSZ)
+    pattern = r"(c[A-Z0-9]+)_p(\d+)_.*_(\d{8}T\d{6}Z)"
+    match = re.search(pattern, filename, re.IGNORECASE)
+
+    if not match:
+        return None
+
+    return {
+        "location": match.group(1),
+        "p_version": int(match.group(2)),
+        "timestamp": match.group(3),
+        "scene_key": f"{match.group(1)}_{match.group(3)}",  # Unique per location + capture time
+    }
+
+
+def group_and_filter_gee_files(
+    client: Any, bucket_name: str, prefixes: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Scans GCS, groups by Location+Timestamp, and selects the highest p-version.
+    """
+    # temp_map structure: { scene_key: { "max_p": int, "cog": str, "geojson": str } }
+    temp_map = {}
 
     for prefix in prefixes:
-        logger.info(f"Scanning prefix for grouping: {prefix}")
+        logger.info(f"Scanning prefix: {prefix}")
         bucket = client.bucket(bucket_name)
         blobs = bucket.list_blobs(prefix=prefix)
 
         for blob in blobs:
             name = blob.name
-            dt = extract_datetime_from_filename(name)
-            if not dt:
+            meta = extract_file_metadata(name)
+
+            if not meta:
                 continue
 
-            date_key = dt.strftime("%Y%m%d")
-            if date_key not in grouped:
-                grouped[date_key] = {"cog": None, "geojson": None}
+            scene_key = meta["scene_key"]
+            p_val = meta["p_version"]
+            is_cog = "core/" in name and name.lower().endswith(".tif")
+            is_json = "divergence_integral/" in name and name.lower().endswith(
+                ".geojson"
+            )
 
-            if "core/" in name and "COG_GEE" in name and name.lower().endswith(".tif"):
-                grouped[date_key]["cog"] = name
-            elif "divergence_integral/" in name and name.lower().endswith(".geojson"):
-                grouped[date_key]["geojson"] = name
+            if scene_key not in temp_map:
+                temp_map[scene_key] = {"max_p": -1, "cog": None, "geojson": None}
 
-    # Filter out entries with no COG (as COG is the primary item)
-    final_groups = {k: v for k, v in grouped.items() if v["cog"]}
-    logger.info(f"Found {len(final_groups)} matched/available items based on COGs.")
+            # Logic: If this file has a newer or equal processing version than what we've seen
+            if p_val >= temp_map[scene_key]["max_p"]:
+                # If it's a strictly newer version, reset the versions
+                if p_val > temp_map[scene_key]["max_p"]:
+                    temp_map[scene_key]["max_p"] = p_val
+                    # Reset if new version found to ensure COG and JSON belong to same P-version
+                    if is_cog:
+                        temp_map[scene_key]["cog"] = name
+                        temp_map[scene_key]["geojson"] = (
+                            None  # Reset JSON, wait for matching P
+                        )
+                    elif is_json:
+                        temp_map[scene_key]["geojson"] = name
+                        temp_map[scene_key]["cog"] = (
+                            None  # Reset COG, wait for matching P
+                        )
+                else:
+                    # Same version, just fill the missing slot
+                    if is_cog:
+                        temp_map[scene_key]["cog"] = name
+                    if is_json:
+                        temp_map[scene_key]["geojson"] = name
+
+    # Final cleanup: Only return groups that have at least a COG
+    final_groups = {k: v for k, v in temp_map.items() if v["cog"]}
+
+    logger.info(f"Grouped into {len(final_groups)} unique scenes.")
     return final_groups
 
 
@@ -392,45 +440,6 @@ def find_items_by_asset_filename(
     logger.error(f"No matching item found in STAC collection for filename: {filename}")
 
 
-def filter_latest_processing(paths: list[str]) -> list[str]:
-    """
-    Keep all non-.tif files.
-    For .tif files: keep only the highest pXXXX per scene.
-
-    :param paths: list[str]
-    :return: list[str]
-    """
-
-    pattern = re.compile(r"(c\d+[A-Z0-9]+)_p(\d+)_(v\d+_\d{8}T\d{6}Z_\d{6}Z)")
-
-    grouped = defaultdict(list)
-    result = []
-
-    for path in paths:
-        if not path.lower().endswith(".tif"):
-            # always keep non-TIF (e.g. geojson)
-            result.append(path)
-            continue
-
-        match = pattern.search(path)
-        if not match:
-            # if TIF but doesn't match pattern, keep it (safer)
-            result.append(path)
-            continue
-
-        scene_prefix = f"{match.group(1)}_{match.group(3)}"
-        p_value = int(match.group(2))
-
-        grouped[scene_prefix].append((p_value, path))
-
-    # select highest pXXXX per scene for TIFs
-    for group in grouped.values():
-        best = max(group, key=lambda x: x[0])
-        result.append(best[1])
-
-    return result
-
-
 def main() -> None:
     load_dotenv(override=True)
 
@@ -498,24 +507,25 @@ def main() -> None:
                     continue
         else:
             # filter to only contain newest processing id for COGs
-            gee_prefixes_filtered = filter_latest_processing(gee_prefixes)
-            # 2.1 Group files by date
-            grouped_items = group_gee_files_by_date(
-                gcs_client, gee_bucket_name, gee_prefixes_filtered
+            grouped_items = group_and_filter_gee_files(
+                gcs_client, gee_bucket_name, gee_prefixes
             )
 
             if not grouped_items:
                 logger.warning("No matched items found to process.")
                 return
 
-            # Apply limit
-            keys = list(grouped_items.keys())
-            keys_to_process = keys[:limit] if limit else keys  # type: ignore
+            keys_to_process = (
+                list(grouped_items.keys())[:limit]
+                if limit
+                else list(grouped_items.keys())
+            )
+
             logger.info(f"Processing {len(keys_to_process)} matched groups.")
 
             items_to_ingest = []
-            for date_key in keys_to_process:
-                group = grouped_items[date_key]
+            for scene_key in keys_to_process:
+                group = grouped_items[scene_key]
                 cog_gcs_name = group["cog"]
                 geojson_gcs_name = group["geojson"]
 
