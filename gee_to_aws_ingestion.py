@@ -606,7 +606,7 @@ def main() -> None:
                         cleanup_local_file(cog_local_path)
 
                 except Exception as e:
-                    logger.error(f"Failed to process group for {date_key}: {e}")
+                    logger.error(f"Failed to process group for {scene_key}: {e}")
                     continue
 
         # 4.4 Ingest Items
