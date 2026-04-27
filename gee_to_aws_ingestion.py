@@ -64,7 +64,11 @@ def extract_file_metadata(filename: str) -> Optional[Dict[str, Any]]:
 
 
 def group_and_filter_gee_files(
-    client: Any, bucket_name: str, prefixes: List[str]
+    client: Any,
+    bucket_name: str,
+    prefixes: List[str],
+    cog_filter_allow: Optional[str] = None,
+    cog_filter_deny: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Scans GCS, groups by Location+Timestamp, and selects the highest p-version.
@@ -87,6 +91,12 @@ def group_and_filter_gee_files(
             scene_key = meta["scene_key"]
             p_val = meta["p_version"]
             is_cog = "core/" in name and name.lower().endswith(".tif")
+            if is_cog:
+                if cog_filter_allow and cog_filter_allow not in name:
+                    is_cog = False
+                if cog_filter_deny and cog_filter_deny in name:
+                    is_cog = False
+
             is_json = "divergence_integral/" in name and name.lower().endswith(
                 ".geojson"
             )
@@ -460,6 +470,8 @@ def main() -> None:
     skip_download = os.getenv("SKIP_DOWNLOAD", "false").lower() == "true"
     skip_upload = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
     do_cleanup = os.getenv("DO_CLEANUP", "false").lower() == "true"
+    cog_filter_allow = os.getenv("COG_FILTER_ALLOW", "COG_GEE")
+    cog_filter_deny = os.getenv("COG_FILTER_DENY", "COG_Portal")
 
     style_url = os.getenv("STAC_STYLE_URL")
     if not all([gee_bucket_name, aws_bucket_name]):
@@ -508,7 +520,11 @@ def main() -> None:
         else:
             # filter to only contain newest processing id for COGs
             grouped_items = group_and_filter_gee_files(
-                gcs_client, gee_bucket_name, gee_prefixes
+                gcs_client,
+                gee_bucket_name,
+                gee_prefixes,
+                cog_filter_allow=cog_filter_allow,
+                cog_filter_deny=cog_filter_deny,
             )
 
             if not grouped_items:
