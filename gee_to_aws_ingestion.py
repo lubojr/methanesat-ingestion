@@ -329,8 +329,9 @@ def create_stac_item(
         collection=collection_id,
         input_datetime=item_datetime,
         assets=assets,
-        with_proj=True,
+        with_proj=False,
         with_raster=True,
+        with_eo=False,
     )
 
     # Add optional vector style link
