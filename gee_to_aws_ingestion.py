@@ -609,6 +609,22 @@ def main() -> None:
                             if prop not in item.properties:
                                 item.properties[prop] = remote_item["properties"][prop]
 
+                        # Overwrite footprint with target_geometry if available
+                        target_geometry = remote_item.get("properties", {}).get(
+                            "target_geometry"
+                        )
+                        if target_geometry:
+                            logger.info(
+                                f"Overwriting footprint with target_geometry for {item.id}"
+                            )
+                            item.geometry = {
+                                "type": "Polygon",
+                                "coordinates": [target_geometry],
+                            }
+                            lons = [p[0] for p in target_geometry]
+                            lats = [p[1] for p in target_geometry]
+                            item.bbox = [min(lons), min(lats), max(lons), max(lats)]
+
                     # Persist STAC JSON to S3
                     stac_s3_key = cog_s3_key.rsplit(".", 1)[0] + ".json"
                     upload_json_to_s3(
