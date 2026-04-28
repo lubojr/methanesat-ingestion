@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 import re
 import requests
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Tuple
 from dotenv import load_dotenv
 from google.cloud import storage
 import boto3
 import pystac
+import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rio_stac import stac
 from pypgstac.db import PgstacDB
 from pypgstac.load import Methods, Loader
@@ -176,6 +177,62 @@ def download_gee_file(
     blob.download_to_filename(destination_path)
     logger.info(f"Successfully downloaded to {destination_path}")
     return destination_path
+
+
+def convert_cog_file(local_path: str) -> str:
+    """
+    Convert COG to EPSG:4326 using rio-stac's stac.create_stac_item functionality.
+    This is a workaround to ensure the COGs are in a consistent CRS for STAC metadata extraction.
+    The converted file will have "_4326" appended before the file extension.
+    """
+    output_path = local_path.rsplit(".", 1)[0] + "_4326.tif"
+    logger.info(f"Converting {local_path} to EPSG:4326 at {output_path}")
+    dst_crs = "EPSG:4326"
+    try:
+        with rasterio.open(local_path) as src:
+            transform, width, height = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds
+            )
+            kwargs = src.meta.copy()
+            kwargs.update(
+                {
+                    "crs": dst_crs,
+                    "transform": transform,
+                    "width": width,
+                    "height": height,
+                    "tiled": True,
+                    "blockxsize": 512,
+                    "blockysize": 512,
+                    "compress": "deflate",
+                }
+            )
+            with rasterio.open(
+                output_path,
+                "w+",
+                driver="COG",
+                transform=transform,
+                height=height,
+                width=width,
+                dtype=src.dtypes[0],
+                count=len(src.indexes),
+                crs="EPSG:4326",
+            ) as dst:
+                for i in src.indexes:
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs=dst_crs,
+                        resampling=Resampling.bilinear,
+                    )
+                dst.colorinterp = src.colorinterp
+                logger.info(f"Successfully converted to {output_path}")
+                return output_path
+    except Exception as e:
+        logger.error(f"Failed to convert COG {local_path} to EPSG:4326: {e}")
+        raise
 
 
 def get_s3_client() -> Any:
@@ -556,10 +613,11 @@ def main() -> None:
                         skip_if_exists=skip_download,
                     )  # type: ignore
                     cog_s3_key = os.path.join(aws_s3_prefix, cog_gcs_name)  # type: ignore
+                    cog_local_path_4326 = convert_cog_file(cog_local_path)
                     cog_s3_url = upload_to_s3(
                         s3_client,
                         aws_bucket_name,
-                        cog_local_path,
+                        cog_local_path_4326,
                         cog_s3_key,
                         skip_if_exists=skip_upload,
                     )
@@ -593,7 +651,7 @@ def main() -> None:
                     # 3. Create STAC Item
                     item_dt = extract_datetime_from_filename(cog_gcs_name)  # type: ignore
                     item = create_stac_item(
-                        cog_local_path,
+                        cog_local_path_4326,
                         cog_s3_url,
                         collection.id,
                         item_datetime=item_dt,
@@ -637,6 +695,7 @@ def main() -> None:
                     # Cleanup COG
                     if do_cleanup:
                         cleanup_local_file(cog_local_path)
+                        cleanup_local_file(cog_local_path_4326)
 
                 except Exception as e:
                     logger.error(f"Failed to process group for {scene_key}: {e}")
