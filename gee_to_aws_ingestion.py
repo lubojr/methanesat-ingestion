@@ -333,7 +333,7 @@ def create_alternate_links(s3_url: str) -> Dict[str, Any]:
     Create the 'alternate' dictionary for STAC assets.
     """
     return {
-        "https": {
+        "s3": {
             "href": s3_url,
             "description": "Access through s3.",
             "alternate:name": "s3",
