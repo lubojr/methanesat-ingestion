@@ -373,7 +373,7 @@ def create_stac_item(
         assets["distinct_point_sources"] = pystac.Asset(
             href=geojson_primary_href,
             media_type=pystac.MediaType.GEOJSON,
-            roles=["metadata", "vector"],
+            roles=["data"],
             extra_fields={
                 "alternate": create_alternate_links(geojson_s3_url),
                 "alternate:name": "https",
