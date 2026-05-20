@@ -347,7 +347,8 @@ def create_stac_item(
     collection_id: str,
     item_datetime: Optional[datetime] = None,
     geojson_s3_url: Optional[str] = None,
-    style_url: Optional[str] = None,
+    style_url_geojson: Optional[str] = None,
+    style_url_geotiff: Optional[str] = None,
     public_url_prefix: Optional[str] = None,
 ) -> pystac.Item:
     logger.info(f"Generating STAC item for {s3_url}")
@@ -356,13 +357,14 @@ def create_stac_item(
 
     # Create base assets
     assets = {
-        "data": pystac.Asset(
+        "dispersed_area_emissions": pystac.Asset(
             href=primary_href,
             media_type=pystac.MediaType.COG,
             roles=["data"],
             extra_fields={
                 "alternate": create_alternate_links(s3_url),
                 "alternate:name": "https",
+                "title": "Dispersed Area Emissions",
             },
         )
     }
@@ -375,6 +377,7 @@ def create_stac_item(
             media_type=pystac.MediaType.GEOJSON,
             roles=["data"],
             extra_fields={
+                "title": "Distinct Point Sources",
                 "alternate": create_alternate_links(geojson_s3_url),
                 "alternate:name": "https",
             },
@@ -392,13 +395,22 @@ def create_stac_item(
     )
 
     # Add optional vector style link
-    if style_url and geojson_s3_url:
+    if style_url_geojson and geojson_s3_url:
         item.add_link(
             pystac.Link(
                 rel="style",
-                target=style_url,
+                target=style_url_geojson,
                 media_type="text/vector-styles",
                 extra_fields={"asset:keys": ["distinct_point_sources"]},
+            )
+        )
+    if style_url_geotiff:
+        item.add_link(
+            pystac.Link(
+                rel="style",
+                target=style_url_geotiff,
+                media_type="text/raster-styles",
+                extra_fields={"asset:keys": ["dispersed_area_emissions"]},
             )
         )
 
@@ -531,7 +543,8 @@ def main() -> None:
     cog_filter_allow = os.getenv("COG_FILTER_ALLOW", "COG_GEE")
     cog_filter_deny = os.getenv("COG_FILTER_DENY", "COG_Portal")
 
-    style_url = os.getenv("STAC_STYLE_URL")
+    style_url_geojson = os.getenv("STAC_STYLE_URL_GEOJSON")
+    style_url_geotiff = os.getenv("STAC_STYLE_URL_GEOTIFF")
     if not all([gee_bucket_name, aws_bucket_name]):
         logger.error(
             "Missing required environment variables (GEE_BUCKET, AWS_S3_BUCKET)."
@@ -656,7 +669,8 @@ def main() -> None:
                         collection.id,
                         item_datetime=item_dt,
                         geojson_s3_url=geojson_s3_url,
-                        style_url=style_url,
+                        style_url_geojson=style_url_geojson,
+                        style_url_geotiff=style_url_geotiff,
                         public_url_prefix=stac_public_url_prefix,
                     )
                     remote_item = find_items_by_asset_filename(
