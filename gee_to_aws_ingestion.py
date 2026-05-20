@@ -374,6 +374,7 @@ def create_stac_item(
     style_url_geotiff: Optional[str] = None,
     public_url_prefix: Optional[str] = None,
     titiler_public_url: Optional[str] = None,
+    geojson_local_path: Optional[str] = None,
 ) -> pystac.Item:
     logger.info(f"Generating STAC item for {s3_url}")
 
@@ -425,6 +426,11 @@ def create_stac_item(
         with_eo=False,
     )
 
+    # Extract properties from GeoJSON if available
+    if geojson_local_path:
+        geojson_props = extract_geojson_properties(geojson_local_path)
+        item.properties.update(geojson_props)
+
     # Add optional vector style link
     if style_url_geojson and geojson_s3_url:
         item.add_link(
@@ -468,6 +474,41 @@ def is_geojson_valid(local_path: str) -> bool:
     except Exception as e:
         logger.error(f"Error reading GeoJSON {local_path}: {e}")
         return False
+
+
+def extract_geojson_properties(local_path: str) -> Dict[str, Any]:
+    """
+    Extract specific properties from the first feature of a GeoJSON file.
+    Prefixes keys with 'distinct_point_source_'.
+    """
+    logger.info(f"Extracting properties from GeoJSON: {local_path}")
+    try:
+        with open(local_path, "r") as f:
+            data = json.load(f)
+            features = data.get("features", [])
+            if not features:
+                return {}
+
+            # Use properties from the first feature
+            props = features[0].get("properties", {})
+            keys_to_extract = [
+                "flux",
+                "flux_hi",
+                "flux_lo",
+                "flux_sd",
+                "time_coverage_start",
+                "time_coverage_end",
+            ]
+
+            extracted = {}
+            for key in keys_to_extract:
+                if key in props:
+                    extracted[f"distinct_point_source_{key}"] = props[key]
+
+            return extracted
+    except Exception as e:
+        logger.error(f"Failed to extract properties from {local_path}: {e}")
+        return {}
 
 
 def upload_json_to_s3(
@@ -670,6 +711,7 @@ def main() -> None:
 
                     # 2. Process optional GeoJSON
                     geojson_s3_url = None
+                    geojson_local_path = None
                     if geojson_gcs_name:
                         geojson_local_path = download_gee_file(
                             gcs_client,
@@ -691,8 +733,6 @@ def main() -> None:
                                 geojson_s3_key,
                                 skip_if_exists=skip_upload,
                             )
-                        if do_cleanup:
-                            cleanup_local_file(geojson_local_path)
 
                     # 3. Create STAC Item
                     item_dt = extract_datetime_from_filename(cog_gcs_name)  # type: ignore
@@ -706,6 +746,7 @@ def main() -> None:
                         style_url_geotiff=style_url_geotiff,
                         public_url_prefix=stac_public_url_prefix,
                         titiler_public_url=titiler_public_url,
+                        geojson_local_path=geojson_local_path,
                     )
                     remote_item = find_items_by_asset_filename(
                         stac_feature_collection, Path(cog_local_path).name
@@ -740,10 +781,12 @@ def main() -> None:
 
                     items_to_ingest.append(item)
 
-                    # Cleanup COG
+                    # Cleanup files
                     if do_cleanup:
                         cleanup_local_file(cog_local_path)
                         cleanup_local_file(cog_local_path_4326)
+                        if geojson_local_path:
+                            cleanup_local_file(geojson_local_path)
 
                 except Exception as e:
                     logger.error(f"Failed to process group for {scene_key}: {e}")
