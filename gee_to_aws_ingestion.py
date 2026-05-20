@@ -341,6 +341,29 @@ def create_alternate_links(s3_url: str) -> Dict[str, Any]:
     }
 
 
+def add_thumbnail(
+    item_id: str, asset_name: str, titiler_public_url: str, collection: str
+):
+    endpoint = os.path.join(
+        titiler_public_url, "collections", collection, "items", item_id, "preview"
+    )
+    query_parameters = {
+        "format": "png",
+        "assets": [asset_name],
+        "expression": f"{asset_name}_b1",
+        "rescale": "1,140",
+        "colormap_name": "reds",
+        "width": 64,
+        "height": 64,
+    }
+    request = requests.Request("GET", endpoint, params=query_parameters)
+    href = request.prepare()
+    asset = pystac.Asset(
+        href=href.url, media_type=pystac.MediaType.PNG, roles=["overview"]
+    )
+    return asset
+
+
 def create_stac_item(
     local_path: str,
     s3_url: str,
@@ -350,14 +373,16 @@ def create_stac_item(
     style_url_geojson: Optional[str] = None,
     style_url_geotiff: Optional[str] = None,
     public_url_prefix: Optional[str] = None,
+    titiler_public_url: Optional[str] = None,
 ) -> pystac.Item:
     logger.info(f"Generating STAC item for {s3_url}")
 
     primary_href = map_s3_to_public_url(s3_url, public_url_prefix)
 
     # Create base assets
+    tif_asset_name = "dispersed_area_emissions"
     assets = {
-        "dispersed_area_emissions": pystac.Asset(
+        tif_asset_name: pystac.Asset(
             href=primary_href,
             media_type=pystac.MediaType.COG,
             roles=["data"],
@@ -382,10 +407,16 @@ def create_stac_item(
                 "alternate:name": "https",
             },
         )
+    item_id = os.path.basename(local_path).split(".")[0]
+    # create thumbnail asset using titiler
+    thumbnail_asset = add_thumbnail(
+        item_id, tif_asset_name, titiler_public_url, collection_id
+    )
+    assets["thumbnail"] = thumbnail_asset
 
     item = stac.create_stac_item(
         local_path,
-        id=os.path.basename(local_path).split(".")[0],
+        id=item_id,
         collection=collection_id,
         input_datetime=item_datetime,
         assets=assets,
@@ -410,7 +441,7 @@ def create_stac_item(
                 rel="style",
                 target=style_url_geotiff,
                 media_type="text/raster-styles",
-                extra_fields={"asset:keys": ["dispersed_area_emissions"]},
+                extra_fields={"asset:keys": [tif_asset_name]},
             )
         )
 
@@ -545,6 +576,8 @@ def main() -> None:
 
     style_url_geojson = os.getenv("STAC_STYLE_URL_GEOJSON")
     style_url_geotiff = os.getenv("STAC_STYLE_URL_GEOTIFF")
+    titiler_public_url = os.getenv("TITILER_PUBLIC_URL")
+
     if not all([gee_bucket_name, aws_bucket_name]):
         logger.error(
             "Missing required environment variables (GEE_BUCKET, AWS_S3_BUCKET)."
@@ -672,6 +705,7 @@ def main() -> None:
                         style_url_geojson=style_url_geojson,
                         style_url_geotiff=style_url_geotiff,
                         public_url_prefix=stac_public_url_prefix,
+                        titiler_public_url=titiler_public_url,
                     )
                     remote_item = find_items_by_asset_filename(
                         stac_feature_collection, Path(cog_local_path).name
